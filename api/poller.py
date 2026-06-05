@@ -1,29 +1,69 @@
+"""
+Module de polling asynchrone pour vérifier la santé des serveurs.
+"""
 import asyncio
 import logging
+from typing import Dict
+
 import httpx
+
 from api.models import Server
 
 logger = logging.getLogger(__name__)
 
+POLL_INTERVAL = 10
+REQUEST_TIMEOUT = 5.0
 
-async def poll_server(server_id: int, url: str, store: dict[int, Server]) -> None:
-    """Check a single server's /health endpoint and update its status in store."""
+
+async def poll_server(server: Server) -> None:
+    """
+    Teste l'endpoint GET /health d'un serveur et met à jour son statut.
+
+    Status possibles :
+    - UP       : réponse 200 reçue
+    - DEGRADED : réponse HTTP mais code != 200
+    - DOWN     : pas de réponse (timeout, connexion refusée)
+
+    Args:
+        server: Instance Server à tester et mettre à jour.
+    """
+    url = f"{server.base_url()}/health"
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{url}/health")
-        store[server_id].status = "UP" if resp.status_code == 200 else "DEGRADED"
-        logger.info("%-20s → %s", store[server_id].name, store[server_id].status)
-    except Exception as e:
-        if server_id in store:
-            store[server_id].status = "DOWN"
-        logger.warning("%-20s → DOWN (%s)", url, e)
-
-
-async def run_poll_loop(store: dict[int, Server], interval: int = 10) -> None:
-    """Infinite loop: poll all servers concurrently every `interval` seconds."""
-    while True:
-        if store:
-            await asyncio.gather(
-                *[poll_server(sid, s.base_url(), store) for sid, s in store.items()]
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            response = await client.get(url)
+            if response.status_code == 200:
+                server.status = "UP"
+            else:
+                server.status = "DEGRADED"
+            logger.info(
+                "Polled %s (%s) → %s [HTTP %d]",
+                server.name,
+                url,
+                server.status,
+                response.status_code,
             )
-        await asyncio.sleep(interval)
+    except Exception as exc:
+        server.status = "DOWN"
+        logger.warning(
+            "Polled %s (%s) → DOWN (%s)",
+            server.name,
+            url,
+            exc,
+        )
+
+
+async def run_poll_loop(servers: Dict[str, Server]) -> None:
+    """
+    Boucle infinie qui poll tous les serveurs enregistrés toutes les
+    POLL_INTERVAL secondes.
+
+    Args:
+        servers: Dictionnaire {server_id: Server} partagé avec l'app.
+    """
+    logger.info("Poll loop started (interval=%ds)", POLL_INTERVAL)
+    while True:
+        if servers:
+            await asyncio.gather(
+                *[poll_server(s) for s in servers.values()]
+            )
+        await asyncio.sleep(POLL_INTERVAL)

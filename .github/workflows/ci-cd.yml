@@ -2,9 +2,13 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: ["main", "master"]
+    branches: ["**"]
   pull_request:
-    branches: ["main", "master"]
+    branches: [main]
+
+env:
+  API_IMAGE: devops-monitor-api
+  DASHBOARD_IMAGE: devops-monitor-dashboard
 
 jobs:
   test:
@@ -13,80 +17,75 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Lint with flake8
-        run: flake8 api/ dashboard/ tests/ --max-line-length=100
+        run: flake8 api/ dashboard/ tests/ --max-line-length=88
 
       - name: Run tests with coverage
-        run: pytest tests/ -v --cov=api --cov-report=term-missing --cov-fail-under=75
         env:
-          API_KEY: dev-secret-key
+          API_KEY: test-secret-key
+        run: |
+          pytest tests/ -v \
+            --cov=api \
+            --cov-report=term-missing \
+            --cov-fail-under=75
 
   build:
     name: Build & Push Docker images
     runs-on: ubuntu-latest
     needs: test
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Log in to Azure Container Registry
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ${{ secrets.ACR_NAME }}.azurecr.io
-          username: ${{ secrets.AZURE_CLIENT_ID }}
-          password: ${{ secrets.AZURE_CLIENT_SECRET }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build & push API image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: api/Dockerfile
-          push: true
-          tags: ${{ secrets.ACR_NAME }}.azurecr.io/devops-monitor-api:${{ github.sha }}
+      - name: Build and push API image
+        run: |
+          docker build -f api/Dockerfile \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.API_IMAGE }}:${{ github.sha }} \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.API_IMAGE }}:latest .
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.API_IMAGE }}:${{ github.sha }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.API_IMAGE }}:latest
 
-      - name: Build & push Dashboard image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: dashboard/Dockerfile
-          push: true
-          tags: ${{ secrets.ACR_NAME }}.azurecr.io/devops-monitor-dashboard:${{ github.sha }}
+      - name: Build and push Dashboard image
+        run: |
+          docker build -f dashboard/Dockerfile \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DASHBOARD_IMAGE }}:${{ github.sha }} \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DASHBOARD_IMAGE }}:latest .
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DASHBOARD_IMAGE }}:${{ github.sha }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DASHBOARD_IMAGE }}:latest
 
   deploy:
-    name: Deploy to Azure Container Apps
+    name: Deploy to Azure Web Apps
     runs-on: ubuntu-latest
     needs: build
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
-      - name: Azure Login
-        uses: azure/login@v2
+      - name: Deploy API to Azure Web App
+        uses: azure/webapps-deploy@v3
         with:
-          creds: |
-            {
-              "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
-              "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
-              "tenantId": "${{ secrets.AZURE_TENANT_ID }}",
-              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-            }
+          app-name: ${{ secrets.AZURE_WEBAPP_API_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_API_PUBLISH_PROFILE }}
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.API_IMAGE }}:${{ github.sha }}
 
-      - name: Deploy API
-        run: |
-          az containerapp update \
-            --name devops-monitor-api \
-            --resource-group devops-monitor-rg \
-            --image ${{ secrets.ACR_NAME }}.azurecr.io/devops-monitor-api:${{ github.sha }}
-
-      - name: Deploy Dashboard
-        run: |
-          az containerapp update \
-            --name devops-monitor-dashboard \
-            --resource-group devops-monitor-rg \
-            --image ${{ secrets.ACR_NAME }}.azurecr.io/devops-monitor-dashboard:${{ github.sha }}
+      - name: Deploy Dashboard to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ secrets.AZURE_WEBAPP_DASHBOARD_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_DASHBOARD_PUBLISH_PROFILE }}
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DASHBOARD_IMAGE }}:${{ github.sha }}
